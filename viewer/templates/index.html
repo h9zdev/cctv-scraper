@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCTV-SCRAPER // TACTICAL VIEWER</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='tactical.css') }}">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  /* ── App-specific extensions on top of tactical.css ── */
+  .container { margin-left: 240px; padding: 68px 20px 20px; }
+  .sidebar { width: 220px; }
+
+  .toolbar {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    margin-bottom: 16px;
+  }
+  .toolbar input[type="text"] {
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-main);
+    font-family: 'Share Tech Mono', monospace;
+    padding: 8px 10px;
+    flex: 1;
+    min-width: 200px;
+  }
+  .toolbar input[type="text"]:focus { border-color: var(--border-bright); }
+
+  #map { height: 380px; width: 100%; border: 1px solid var(--border-color); margin-bottom: 16px; }
+
+  table.cam-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .cam-table th {
+    text-align: left;
+    color: var(--text-label);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-bright);
+    position: sticky;
+    top: 0;
+    background: var(--panel-bg);
+  }
+  .cam-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-main);
+    vertical-align: top;
+  }
+  .cam-table tr:hover td { background: rgba(0, 255, 209, 0.04); }
+  .cam-table .mono-dim { color: var(--text-dim); }
+  .cam-table a { color: var(--neon-cyan); text-decoration: none; }
+  .cam-table a:hover { text-decoration: underline; }
+
+  .table-wrap { max-height: 55vh; overflow-y: auto; border: 1px solid var(--border-color); }
+
+  .pager { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+  .pager button {
+    background: transparent; border: 1px solid var(--border-color); color: var(--text-main);
+    padding: 6px 12px; cursor: pointer; font-family: 'Share Tech Mono', monospace; font-size: 11px;
+  }
+  .pager button:hover:not(:disabled) { border-color: var(--border-bright); }
+  .pager button:disabled { opacity: 0.3; cursor: not-allowed; }
+  .pager span { font-size: 11px; color: var(--text-dim); }
+
+  .loading-row td { text-align: center; color: var(--text-dim); padding: 20px; }
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+
+<div class="topnav">
+  <div class="left-group">
+    <div class="hamburger" id="hamburger" aria-expanded="false"><span></span></div>
+    <div class="logo-section">
+      <div class="logo-text">
+        <h2>CCTV-SCRAPER</h2>
+        <p>Tactical Camera Viewer</p>
+      </div>
+    </div>
+  </div>
+  <div class="nav-stats">
+    <div class="stat-item"><span class="status-dot"></span><span id="total-count">--</span> FEEDS INDEXED</div>
+  </div>
+</div>
+
+<div class="sidebar" id="sidebar">
+  <div class="menu-group">
+    <div class="menu-title">Data Source</div>
+    {% for s in sources %}
+    <div class="menu-item source-item" data-state="{{ s }}">
+      <span class="menu-icon">▸</span> {{ s }}
+      <span class="mono-dim" id="count-{{ s }}" style="margin-left:auto;font-size:10px;"></span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="container">
+  <div class="page-header">
+    <h1 id="page-title">GLOBAL // CAMERA FEED DATABASE</h1>
+  </div>
+
+  <div id="map"></div>
+
+  <div class="toolbar">
+    <input type="text" id="search" placeholder="SEARCH BY NAME / REGION...">
+    <button class="card-button primary" id="refresh-btn">REFRESH</button>
+  </div>
+
+  <div class="table-wrap">
+    <table class="cam-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>NAME</th>
+          <th>REGION</th>
+          <th>LAT</th>
+          <th>LON</th>
+          <th>DETAIL</th>
+          <th>MEDIA</th>
+          <th>UPDATED</th>
+        </tr>
+      </thead>
+      <tbody id="table-body">
+        <tr class="loading-row"><td colspan="8">LOADING...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pager">
+    <button id="prev-btn">◂ PREV</button>
+    <span id="page-info">PAGE 1</span>
+    <button id="next-btn">NEXT ▸</button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const state = { source: "GLOBAL", search: "", page: 1, perPage: 50, total: 0 };
+let map, markerLayer;
+
+function initMap() {
+  map = L.map('map', { zoomControl: true }).setView([39.5, -98.35], 4);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap',
+    maxZoom: 18
+  }).addTo(map);
+  markerLayer = L.layerGroup().addTo(map);
+}
+
+async function loadStats() {
+  const res = await fetch('/api/stats');
+  const data = await res.json();
+  let total = 0;
+  for (const [k, v] of Object.entries(data)) {
+    const el = document.getElementById('count-' + k);
+    if (el) el.textContent = v;
+    total += v;
+  }
+  document.getElementById('total-count').textContent = total;
+}
+
+async function loadMapPoints() {
+  markerLayer.clearLayers();
+  try {
+    const res = await fetch(`/api/cameras/map?state=${state.source}`);
+    const points = await res.json();
+    const bounds = [];
+    points.slice(0, 3000).forEach(p => {
+      if (p.lat == null || p.lon == null) return;
+      const marker = L.circleMarker([p.lat, p.lon], {
+        radius: 3, color: '#00FFD1', fillColor: '#00FFD1', fillOpacity: 0.8, weight: 1
+      }).bindPopup(`<b>${escapeHtml(p.name || 'UNKNOWN')}</b><br>ID: ${escapeHtml(String(p.id))}`);
+      markerLayer.addLayer(marker);
+      bounds.push([p.lat, p.lon]);
+    });
+    if (bounds.length) map.fitBounds(bounds, { padding: [20, 20], maxZoom: 12 });
+  } catch (e) { console.error(e); }
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+async function loadTable() {
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="8">LOADING...</td></tr>';
+  const params = new URLSearchParams({
+    state: state.source, search: state.search, page: state.page, per_page: state.perPage
+  });
+  const res = await fetch(`/api/cameras?${params}`);
+  const data = await res.json();
+  state.total = data.total;
+
+  if (!data.rows.length) {
+    tbody.innerHTML = '<tr class="loading-row"><td colspan="8">NO RESULTS</td></tr>';
+  } else {
+    tbody.innerHTML = data.rows.map(r => `
+      <tr>
+        <td class="mono-dim">${escapeHtml(r.id)}</td>
+        <td>${escapeHtml(r.name)}</td>
+        <td class="mono-dim">${escapeHtml(r.region)}</td>
+        <td class="mono-dim">${r.lat ?? ''}</td>
+        <td class="mono-dim">${r.lon ?? ''}</td>
+        <td class="mono-dim">${escapeHtml(r.extra)}</td>
+        <td>${r.media ? `<a href="${escapeHtml(r.media)}" target="_blank" rel="noopener">LINK</a>` : ''}</td>
+        <td class="mono-dim">${escapeHtml(r.updated)}</td>
+      </tr>
+    `).join('');
+  }
+
+  const maxPage = Math.max(Math.ceil(state.total / state.perPage), 1);
+  document.getElementById('page-info').textContent = `PAGE ${state.page} / ${maxPage} — ${state.total} RESULTS`;
+  document.getElementById('prev-btn').disabled = state.page <= 1;
+  document.getElementById('next-btn').disabled = state.page >= maxPage;
+}
+
+function selectSource(s) {
+  state.source = s;
+  state.page = 1;
+  document.querySelectorAll('.source-item').forEach(el => {
+    el.style.color = el.dataset.state === s ? 'var(--primary-color)' : '';
+    el.style.background = el.dataset.state === s ? 'rgba(0,255,209,0.06)' : '';
+  });
+  document.getElementById('page-title').textContent = `${s} // CAMERA FEED DATABASE`;
+  loadTable();
+  loadMapPoints();
+}
+
+document.querySelectorAll('.source-item').forEach(el => {
+  el.addEventListener('click', () => selectSource(el.dataset.state));
+});
+
+let searchTimer;
+document.getElementById('search').addEventListener('input', (e) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.search = e.target.value;
+    state.page = 1;
+    loadTable();
+  }, 300);
+});
+
+document.getElementById('refresh-btn').addEventListener('click', () => { loadTable(); loadMapPoints(); loadStats(); });
+document.getElementById('prev-btn').addEventListener('click', () => { if (state.page > 1) { state.page--; loadTable(); } });
+document.getElementById('next-btn').addEventListener('click', () => { state.page++; loadTable(); });
+document.getElementById('hamburger').addEventListener('click', function() {
+  document.getElementById('sidebar').classList.toggle('open');
+  const expanded = this.getAttribute('aria-expanded') === 'true';
+  this.setAttribute('aria-expanded', String(!expanded));
+});
+
+initMap();
+loadStats();
+selectSource('GLOBAL');
+</script>
+</body>
+</html>
